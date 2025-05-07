@@ -1,0 +1,3 @@
+# 不提交本项目的node_modules文件夹
+node_modules/
+/dist/
