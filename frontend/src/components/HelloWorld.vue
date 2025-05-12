@@ -1,6 +1,15 @@
 <template>
   <div class="container">
     <h1>批量获取POI坐标</h1>
+    <div>高德密钥
+      <el-input v-model="amapKey" style="width: 240px; padding-left: 5px;" type="password" placeholder="请输入高德key密钥"
+        @change="amapKeyChange" clearable />
+      <el-tooltip effect="dark" content="获取高德地图的密钥" placement="top">
+        <el-icon class="is-infoFilled" size="30" @click="getAmapKey">
+          <InfoFilled />
+        </el-icon>
+      </el-tooltip>
+    </div>
     <h4>只支持excel文件，不支持csv格式</h4>
     <div class="upload-select animate__animated animate__backInDown">
       <el-form :inline="true" class="demo-form-inline" :rules="rules" ref="ruleFormRef" :model="form">
@@ -11,14 +20,12 @@
         </el-form-item>
         <el-form-item label="市" prop="city">
           <el-select v-model="form.city" placeholder="请选择市" clearable @change="selectCity">
-            <el-option v-for="item in cities.districts" :key="item.value" :label="item.label"
-              :value="item.value"></el-option>
+            <el-option v-for="item in cities" :key="item.value" :label="item.label" :value="item.value"></el-option>
           </el-select>
         </el-form-item>
         <el-form-item label="区（县）" prop="district">
-          <el-select v-model="form.district" placeholder="请选择区（县）" clearable>
-            <el-option v-for="item in districts.districts" :key="item.value" :label="item.label"
-              :value="item.value"></el-option>
+          <el-select v-model="form.district" placeholder="请选择区（县）" clearable @change="selectDistrict">
+            <el-option v-for="item in districts" :key="item.value" :label="item.label" :value="item.value"></el-option>
           </el-select>
         </el-form-item>
         <el-form-item label="镇（街道）">
@@ -33,12 +40,24 @@
     <div class="upload-section animate__animated animate__backInLeft">
       <h2>上传Excel文件</h2>
       <!-- <h5>不支持csv格式</h5> -->
-
-      <label for="fileInput">选择Excel文件 (.xlsx, .xls)</label>
-      &nbsp;&nbsp;
-      <input type="file" id="fileInput" accept=".xlsx, .xls" title="选择Excel文件 (.xlsx, .xls)"
-        @change="handleFileChange" />
-      <el-button @click="uploadFile" type="primary" round>上传</el-button>
+      <div class="excelInput">
+        <label for="fileInput">选择Excel文件 (.xlsx, .xls)</label>
+        &nbsp;&nbsp;
+        <input type="file" id="fileInput" accept=".xlsx, .xls" title="选择Excel文件 (.xlsx, .xls)"
+          @change="handleFileChange" />
+        <el-tooltip
+          content="上传"
+          placement="top"
+          effect="dark"
+          :disabled="!fileInput"
+          :open-delay="1000"
+          :close-delay="1000"
+        >
+          <el-icon @click="uploadFile" class="is-uploadFilled" size="28">
+          <UploadFilled />
+        </el-icon>
+        </el-tooltip>
+      </div>
       <div id="uploadStatus">{{ uploadStatus }}</div>
       <el-progress type="circle" :percentage="percentage" :status="fileProcessStatus" v-show="processShow" indeterminate
         :width="55" :stroke-width="7" striped stripe-flow />
@@ -57,7 +76,8 @@
 
 <script setup>
 import { ref, reactive, onMounted, computed } from 'vue';
-const backendPort = import.meta.env.VITE_BACKEND_PORT || '8081';
+const backendPort = import.meta.env.VITE_BACKEND_PORT || '3000';
+const amapKey = ref('');
 const fileInput = ref(null);
 const uploadStatus = ref('先选择文件，再点击上传按钮');
 const downloadStatus = ref('');
@@ -96,71 +116,153 @@ const form = reactive({
   city: '',
   district: '',
   town: '',
+  districtLabel: '',
+  cityLabel: '',
+  provinceLabel: '',
 })
 
 const provinces = ref([])
 const cities = ref([])
 const districts = ref([])
 const towns = ref([])
-let provinceData = []
-const selectProvince = (value) => {
-  fetchCity(value);
+const publicKeyPem = ref('')
+
+const getAmapKey = async () => {
+  window.open('https://lbs.amap.com/', '_blank')
+}
+//使用Web Crypto API加密敏感数据
+const encrypWithPublicKey = async (data, publicKeyPem) => {
+  //将PEM格式的公钥转换为CryptoKey对象
+  const pemHeader = "-----BEGIN PUBLIC KEY-----";
+  const pemFooter = "-----END PUBLIC KEY-----";
+  const pemContents = publicKeyPem.replace(pemHeader, "").replace(pemFooter, "").replace(/\s+/g, ""); // 去除换行和空格
+  const publicKeyBytes = Uint8Array.from(atob(pemContents), c => c.charCodeAt(0));
+  const publicKey = await crypto.subtle.importKey(
+    "spki",
+    publicKeyBytes,
+    {
+      name: "RSA-OAEP",
+      hash: "SHA-256",
+    },
+    false,
+    ["encrypt"]
+  );
+  //2.加密数据
+  const encodedData = new TextEncoder().encode(data);
+  const encryptedData = await crypto.subtle.encrypt(
+    {
+      name: "RSA-OAEP",
+    },
+    publicKey,
+    encodedData
+  );
+  //3.将加密后的数据转换为Base64编码
+  return btoa(String.fromCharCode(...new Uint8Array(encryptedData)));
 }
 
-const selectCity = (value) => {
-  fetchDistrict(value);
+const getRsaPublicKey = async () => {
+  try {
+    const response = await fetch(`http://localhost:${backendPort}/rsaPublicKey`);
+    const res = await response.text();
+    if (res) {
+      publicKeyPem.value = res;
+    }
+  } catch (error) {
+    console.error('获取公钥失败:', error);
+  }
+}
+const selectProvince = async (value) => {
+  const selectedProvince = provinces.value.find(item => item.value === value);
+  if (selectedProvince) {
+    form.provinceLabel = selectedProvince.label;
+  }
+  cities.value = await selectToGetNextData(value, "city")
+}
+
+const amapKeyChange = async (value) => {
+  if (value === '') return
+  try {
+    encrypWithPublicKey(value, publicKeyPem.value).then(async (encryptedData) => {
+      const response = await fetch(`http://localhost:${backendPort}/key`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ amapKey: encryptedData }),
+      });
+      const result = await response.json();
+      console.log('Encryption设置结果:', result);
+    })
+  } catch (error) {
+    console.error('Encryption密钥失败:', error)
+  }
+}
+
+/**
+ * @description 获取下一数据（城市或者区县或城镇）
+ * @param code 上一级的行政编码
+ * @param level 当前等级
+ * @returns {Promise<Array>} 当前等级的数据
+ */
+const selectToGetNextData = async (code, level) => {
+  try {
+    const params = new URLSearchParams({ code, level });
+    const response = await fetch(`http://localhost:${backendPort}/data?${params}`, {
+      method: 'GET'
+    })
+    const data = await response.json()
+    return data.rows.map(item => ({
+      label: item.name,
+      value: item.adcode,
+      level: item.level,
+      cityCode: item.cityCode,
+    }))
+  } catch (error) {
+    console.error('获取下一数据失败:', error)
+  }
+}
+
+const selectCity = async (value) => {
+  // 获取选中的城市label
+  const selectedCity = cities.value.find(item => item.value === value);
+  if (selectedCity) {
+    form.cityLabel = selectedCity.label;
+  }
+  districts.value = await selectToGetNextData(value, "district")
+}
+
+const selectDistrict = (value) => {
+  // 获取选中的城市label
+  const selectedDistrict = districts.value.find(item => item.value === value);
+  if (selectedDistrict) {
+    form.districtLabel = selectedDistrict.label;
+  }
 }
 
 async function fetchProvinces() {
   try {
-    if (provinceData.length > 0) {
-
-    } else {
-      
-      const response = await fetch(`http://localhost:${backendPort}/provinces`)
-      const data = await response.json()
-      provinces.value = data.districts.map(item => ({
-        label: item.name,
-        value: item.adcode,
-        districts: item.districts.map(district => ({
-          label: district.name,
-          value: district.adcode,
-          districts: district.districts.map(district => ({
-            label: district.name,
-            value: district.adcode
-          }))
-        }))
-      }))
-      // sessionStorage.setItem('provinceData', JSON.stringify(provinceData))
-      return provinces.value;
-    }
-  } catch (error) {
-    console.error('获取省份数据失败:', error)
+    if (provinces.value.length > 0) return
+    const response = await fetch(`http://localhost:${backendPort}/provinces`)
+    const data = await response.json()
+    provinces.value = data.rows.map(item => ({
+      label: item.name,
+      value: item.adcode,
+      level: item.level,
+      cityCode: item.cityCode,
+    }))
+  }
+  catch (error) {
+    console.error('获取省份数据失败:', error);
   }
 }
 
-async function fetchCity(provinceCode) {
-  try {
-    cities.value = provinces.value.find(city => city.value === provinceCode)
-  } catch (error) {
-    console.log(error, '获取城市数据失败');
-  }
-}
 
-async function fetchDistrict(cityCode) {
-  try {
-    districts.value = cities.value.districts.find(district => district.value === cityCode)
-  } catch (error) {
 
-  }
-}
-
-onMounted(() => {
+onMounted(async () => {
   fetchProvinces();
-
+  await getRsaPublicKey()
   // 连接WebSocket
   ws.value = new WebSocket(`ws://localhost:${backendPort}`);
-
   ws.value.onmessage = (event) => {
     const data = JSON.parse(event.data);
     if (data.type === 'progress') {
@@ -203,10 +305,13 @@ async function uploadFile() {
         }
 
         const data = await response.json();
-        console.log(data, "upload");
         if (data && data.message) {
           uploadStatus.value = '文件处理完成，可下载了！';
           fileProcessStatus.value = 'success';
+          // 处理完成后关闭WebSocket连接
+          if (ws.value) {
+            ws.value.close();
+          }
         }
         downloadUrl.value = data.downloadUrl;
         downloadStatus.value = '';
@@ -260,8 +365,8 @@ function downloadFile() {
 .upload-select,
 .upload-section,
 .download-section {
-  margin-bottom: 30px;
-  padding: 20px;
+  margin-bottom: 15px;
+  padding: 15px;
   /* border: 1px solid #ddd; */
   border-radius: 5px;
   text-align: center;
@@ -343,6 +448,33 @@ button:disabled {
 .el-form-item__label {
   font-size: 20px !important;
   font-weight: bold;
+}
+
+.excelInput {
+  height: 40px;
+  padding-bottom: 3px;
+  display: flex;
+  justify-content: space-between;
+  flex-direction: row;
+  width: 100%;
+  align-items: center;
+}
+
+.is-infoFilled {
+  font-size: 30px !important;
+  /* color: #409eff !important; */
+  padding-left: 0.2em;
+  cursor: pointer;
+  vertical-align: middle;
+}
+
+.is-uploadFilled {
+  font-size: 28px !important;
+  /* color: #67c23a!important; */
+  padding-right: 0;
+  vertical-align: middle;
+  cursor: pointer;
+  /* color: gray !important; */
 }
 
 /* .el-progress-circle {
